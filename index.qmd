@@ -1,0 +1,254 @@
+---
+title: "Registros de presencia de especies"
+format: dashboard
+server: shiny
+---
+
+```{r}
+#| label: carga-paquetes
+#| context: setup
+#| warning: false
+#| message: false
+
+# Carga de paquetes
+library(tidyverse)
+library(DT)
+library(plotly)
+library(sf)
+library(leaflet)
+library(shiny)
+library(leaflet.extras)
+library(leafem)
+library(hrbrthemes)
+library(viridisLite)
+library(shiny)
+```
+
+
+```{r}
+
+#| label: carga-union-datos
+#| context: data
+
+registros <-
+  st_read(
+    dsn = "registros-bufonidae.csv",
+    options = c(
+      "X_POSSIBLE_NAMES=decimalLongitude",
+      "Y_POSSIBLE_NAMES=decimalLatitude"
+    ),
+    quiet = TRUE
+  )
+
+st_crs(registros) <- 4326
+
+especies <-
+  read_csv("especies-anfibios.csv")
+
+areas <-
+  st_read("areas-conservacion.gpkg", quiet = TRUE)
+
+registros_union_especies <-
+  left_join(
+    x = registros,
+    y = especies,
+    by = "species"
+  )
+
+registros_union_especies_areas <-
+  st_join(
+    x = registros_union_especies,
+    y = dplyr::select(areas, nombre_ac),
+    join = st_within
+  )
+```
+
+# {.sidebar}
+
+```{r}
+#| label: panel-widgets-entrada
+
+lista_especies <- unique(registros_union_especies_areas$species)
+lista_especies <- sort(lista_especies)
+lista_especies <- c("Todas", lista_especies)
+
+lista_categorias <- unique(registros_union_especies_areas$iucnRedListCategory)
+lista_categorias <- sort(lista_categorias)
+lista_categorias <- c("Todas", lista_categorias)
+
+lista_areas <- unique(registros_union_especies_areas$region)
+lista_areas <- sort(lista_areas)
+lista_areas <- c("Todas", lista_areas)
+
+selectInput(
+  inputId = "specie",      
+  label = "Especie",        
+  choices = lista_especies, 
+  selected = "Todas"        
+)
+
+selectInput(
+  inputId = "category",      
+  label = "Categoria",        
+  choices = lista_categorias, 
+  selected = "Todas"        
+)
+
+selectInput(
+  inputId = "nombre_ac",      
+  label = "Region",        
+  choices = lista_areas, 
+  selected = "Todas"        
+)
+
+sliderInput(
+  inputId = "month",
+  label = "Mes",
+  min = 1,
+  max = 12,
+  value = c(1, 12)
+)
+```
+
+```{r}
+#| label: salida-grafico
+#| title: "Cantidad de registros de presencia"
+
+plotlyOutput(
+	outputId =  "grafico")
+```
+
+```{r}
+#| label: salida-mapa
+#| title: "Distribución espacial de registros de presencia"
+
+leafletOutput(
+	outputId =  "mapa")
+```
+
+```{r}
+#| label: salida-tabla
+#| title: "Tabla de registros de presencia"
+
+dataTableOutput(
+  outputId = "tabla")
+```
+
+```{r}
+
+filtrar_registros <- reactive({
+  registros_filtrados <- registros_union_especies_areas
+   if (input$especie != "Todas") {
+    registros_filtrados <- registros_filtrados |> filter(species == input$especie)
+  }
+  if (input$categoria != "Todas") {
+    registros_filtrados <- registros_filtrados |> filter(redlistCategory == input$categoria)
+  }
+  if (input$region != "Todas") {
+    registros_filtrados <- registros_filtrados |> filter(nombre_ac == input$nombre_ac)
+  }
+  registros_filtrados <- registros_filtrados |> filter(as.numeric(format(as.Date(eventDate), "%Y")) >= input$anios[1] & as.numeric(format(as.Date(eventDate), "%Y")) <= input$anios[2])
+  
+  return(registros_filtrados)
+})
+ # Suma de riqueza de anfibios
+riqueza_especies_anfibios_areas <-
+ registros_union_especies_areas |>
+  st_drop_geometry() |>
+  group_by(nombre_ac) |>
+  summarize(riqueza_especies_anfibios = n_distinct(species, na.rm = TRUE))
+
+areas_union_riqueza <-
+  left_join(
+    x = areas,
+    y = dplyr::select(riqueza_especies_anfibios_areas, nombre_ac, riqueza_especies_anfibios),
+    by = "nombre_ac"
+  ) |>
+  replace_na(list(riqueza_especies_anfibios = 0))
+
+# Paletas de colores
+colores_riqueza <-
+  colorNumeric(
+    palette = "Blues",
+    domain = areas_union_riqueza$riqueza_especies_anfibios,
+    na.color = "transparent"
+  )
+
+colores_especies <- colorFactor(
+  palette = plasma(length(unique(registros$species))), 
+  domain = registros$species
+)
+
+# Gráfico interactivo de registros de presencia por región
+
+leaflet() |>
+  setView(
+    lng = -84,
+    lat = 10,
+    zoom = 7) |>
+  addTiles(group = "Mapa general (OpenStreetMap)") |>
+  addProviderTiles(
+    providers$Esri.WorldImagery, 
+    group = "Imágenes satelitales (ESRI World Imagery)"
+  ) |> 
+  addPolygons(
+    data = areas_union_riqueza,
+    fillColor = ~ colores_especies(areas_union_riqueza$riqueza_especies_anfibios),
+    fillOpacity = 0.8,
+    color = "red",
+    stroke = TRUE,
+    weight = 1.0,
+    popup = paste(
+      paste("<strong>Area de Coservación:</strong>", areas_union_riqueza$nombre_ac),
+      sep = '<br/>'
+    ),
+    group = "Riqueza de especies"
+  )|>
+  addScaleBar(
+    position = "bottomleft", 
+    options = scaleBarOptions(imperial = FALSE)
+  ) |>
+  addCircleMarkers(
+      data = registros_union_especies_areas,
+      radius = 0.4,
+      color = "turquoise",
+      stroke = TRUE,
+      popup = paste(
+        paste0("<strong>Especie</strong>: ", registros_union_especies_areas$species),
+        paste0("<strong>Categoria</strong>: ", registros_union_especies_areas$iucnRedListCategory),
+        paste0("<strong>Region</strong>: ", registros_union_especies_areas$region),
+        paste0("<strong>Fecha</strong>: ", registros_union_especies_areas$eventDate),
+        sep = "<br>"
+      )
+    )
+
+# Tabla interactiva
+
+ registros_union_especies_areas |>
+    st_drop_geometry() |>
+    dplyr::select(species, nombre_ac, iucnRedListCategory, eventDate) |>
+    datatable(
+      rownames = FALSE,
+      colnames = c("Especie", "Región", "Categoría en la Lista Roja", "Fecha"),
+      options = list(
+        pageLength = 10,
+        language = list(url = '//cdn.datatables.net/plug-ins/1.10.11/i18n/Spanish.json')
+      )
+    )
+ 
+# Gráfico interactivo de registros de presencia por región
+  
+    registros_union_especies_areas |>
+    st_drop_geometry() |>
+    group_by(species) |>
+    summarize(n = n()) |>
+    ggplot(aes(x = reorder(species, -n),
+               y = n)) +
+    geom_col() +
+    xlab("Especies") +
+    ylab("Cantidad de registros")
+  
+  ggplotly() |> config(locale = "es")
+
+```
+
